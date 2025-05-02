@@ -4,67 +4,59 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 from unet import UNet
-from carvana_dataset import CarvanaDataset
+from Segmentation.dataset import Dataset
 
-if __name__ == "__main__":
-    LEARNING_RATE = 3e-4
-    BATCH_SIZE = 32
-    EPOCHS = 2
-    DATA_PATH = "/content/drive/MyDrive/uygar/unet-segmentation/data"
-    MODEL_SAVE_PATH = "/content/drive/MyDrive/uygar/unet-segmentation/models/unet.pth"
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    train_dataset = CarvanaDataset(DATA_PATH)
-
-    generator = torch.Generator().manual_seed(42)
-    train_dataset, val_dataset = random_split(train_dataset, [0.8, 0.2], generator=generator)
-
-    train_dataloader = DataLoader(dataset=train_dataset,
-                                batch_size=BATCH_SIZE,
-                                shuffle=True)
-    val_dataloader = DataLoader(dataset=val_dataset,
-                                batch_size=BATCH_SIZE,
-                                shuffle=True)
-
-    model = UNet(in_channels=3, num_classes=1).to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.BCEWithLogitsLoss()
-
-    for epoch in tqdm(range(EPOCHS)):
+def train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs, patience=5):
+    best_val_loss = float("inf")
+    patience_counter = 0
+    for epoch in range(epochs):
         model.train()
-        train_running_loss = 0
-        for idx, img_mask in enumerate(tqdm(train_dataloader)):
-            img = img_mask[0].float().to(device)
-            mask = img_mask[1].float().to(device)
-
-            y_pred = model(img)
+        total_loss, correct, total = 0, 0, 0
+        for img, mask in tqdm(train_loader):
+            img, mask = img.to(device), mask.to(device)
             optimizer.zero_grad()
-
-            loss = criterion(y_pred, mask)
-            train_running_loss += loss.item()
-            
+            output = model(img)
+            loss = criterion(output, mask)
             loss.backward()
             optimizer.step()
-
-        train_loss = train_running_loss / (idx + 1)
+            total_loss += loss.item()
+            pred = (torch.sigmoid(output) > 0.5).float()
+            correct += (pred == mask).sum().item()
+            total += mask.numel()
+        train_acc = correct / total
 
         model.eval()
-        val_running_loss = 0
+        val_loss, val_correct, val_total = 0, 0, 0
         with torch.no_grad():
-            for idx, img_mask in enumerate(tqdm(val_dataloader)):
-                img = img_mask[0].float().to(device)
-                mask = img_mask[1].float().to(device)
-                
-                y_pred = model(img)
-                loss = criterion(y_pred, mask)
+            for img, mask in val_loader:
+                img, mask = img.to(device), mask.to(device)
+                output = model(img)
+                loss = criterion(output, mask)
+                val_loss += loss.item()
+                pred = (torch.sigmoid(output) > 0.5).float()
+                val_correct += (pred == mask).sum().item()
+                val_total += mask.numel()
+        val_acc = val_correct / val_total
 
-                val_running_loss += loss.item()
+        print(f"Epoch {epoch+1}: Train Loss={total_loss/len(train_loader):.4f}, Train Acc={train_acc:.4f}, Val Loss={val_loss/len(val_loader):.4f}, Val Acc={val_acc:.4f}")
 
-            val_loss = val_running_loss / (idx + 1)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), "best_model.pth")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered!")
+                break
 
-        print("-"*30)
-        print(f"Train Loss EPOCH {epoch+1}: {train_loss:.4f}")
-        print(f"Valid Loss EPOCH {epoch+1}: {val_loss:.4f}")
-        print("-"*30)
-
-    torch.save(model.state_dict(), MODEL_SAVE_PATH)
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    train_dataset = Dataset("/content/drive/MyDrive/bitirmeprojesi/pdata")
+    val_dataset = Dataset("/content/drive/MyDrive/bitirmeprojesi/pdata", test=True)
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+    model = UNet(3, 1).to(device)
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    train_model(model, train_loader, val_loader, optimizer, criterion, device, epochs=50, patience=7)
